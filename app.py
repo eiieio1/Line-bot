@@ -397,7 +397,9 @@ def health():
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    body = request.get_data()
+    body = request.get_data(as_text=True)
+    print("[DEBUG] LINE callback received")
+    print("[DEBUG] Body:", body[:1000])
     signature = request.headers.get("X-Line-Signature", "")
 
     if not verify_line_signature(body, signature):
