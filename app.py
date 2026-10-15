@@ -14,12 +14,6 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 user_scores = {}
 
-COMMANDS = {
-    '야옹1': '야옹! 왜 불러?',
-    '야옹2': '꺼지게나아',
-    '야옹3': '진짜 개빡치네',
-    '!명령어': '사용 가능: 야옹1, 야옹2, 야옹3, !마딧수, !마딧수순위, !마딧수리셋'
-}
 
 @app.route("/callback", methods=['POST'])
 def callback():
