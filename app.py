@@ -14,25 +14,16 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("secret-pantry-bot")
 
-# Render 환경변수
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
-GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
-
-GEMINI_MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.6-flash",
-    "gemini-3.1-flash-lite",
-]
+GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 MAX_OUTPUT_TOKENS = 700
 MAX_QUESTION_LENGTH = 12000
 MAX_LINE_REPLY_LENGTH = 4500
-MAX_RETRIES_PER_MODEL = 1
 RETRY_STATUS_CODES = (408, 429, 500, 502, 503, 504)
 
 SYSTEM_PROMPT = """
@@ -83,24 +74,6 @@ SYSTEM_PROMPT = """
 - 음통은 음성통화, 영통은 영상통화, 다락은 단체 통화방.
 """
 
-# 치호의 기존 고정 명령어
-COMMANDS = {
-    "야옹1": "야옹! 왜 불러?",
-    "야옹2": "꺼지게나아",
-    "야옹3": "진짜 개빡치네",
-    "!명령어": (
-        "사용 가능 명령어:\n"
-        "야옹1, 야옹2, 야옹3\n"
-        "!마딧수, !마딧수순위, !마딧수리셋\n"
-        "! 오늘의질문, ! 밸런스게임, ! 순서 이름 이름\n"
-        "! 규칙 주제, ! 용어집, !aimodels"
-    ),
-}
-
-# 기존처럼 메모리에서 집계함.
-# 서버가 재시작되면 점수는 초기화됨.
-user_scores = {}
-
 TODAY_QUESTIONS = [
     "친해지고 싶은 사람에게 먼저 다가가기 vs 기다리기?",
     "첫인상이 좋은 사람 vs 알수록 좋은 사람?",
@@ -123,11 +96,21 @@ BALANCE_QUESTIONS = [
 
 RULES_FAQ = {
     "읽씹": "읽씹은 금지이며 경고 대상이야.",
-    "메시지": "하루 메시지 50개 미만은 주의 대상이야. 하루 이상 자리를 비우거나 하루 30개도 채우기 어렵다면 관리자에게 알리고 닉네임 앞에 🛩️를 붙여. 기준이 충돌하는 상황은 관리자에게 확인해 줘.",
+    "메시지": (
+        "하루 메시지 50개 미만은 주의 대상이야. 하루 이상 자리를 비우거나 "
+        "하루 30개도 채우기 어렵다면 관리자에게 알리고 닉네임 앞에 🛩️를 붙여. "
+        "기준이 충돌하는 상황은 관리자에게 확인해 줘."
+    ),
     "주의": "주의 3회는 경고 1회이며 경고 2회면 강퇴 대상이야.",
     "뒷담화": "뒷담화는 첫 적발 시 경고, 두 번째 적발 시 강퇴야.",
-    "갠라": "미클이 아닌 남성이 여성에게 먼저 갠라를 보내면 1회 적발만으로 강퇴 대상이야. 여성도 미클 인증을 받지 않은 남성에게 먼저 갠라를 보내면 안 돼.",
-    "미클": "여성 1명 초대는 게시판 작성 시간부터 72시간, 여성 2명 초대는 24시간 뒤 미션 클리어야. 지인·친구 초대와 동반 초대는 인정되지 않아.",
+    "갠라": (
+        "미클이 아닌 남성이 여성에게 먼저 갠라를 보내면 1회 적발만으로 "
+        "강퇴 대상이야. 여성도 미클 인증을 받지 않은 남성에게 먼저 갠라를 보내면 안 돼."
+    ),
+    "미클": (
+        "여성 1명 초대는 게시판 작성 시간부터 72시간, 여성 2명 초대는 "
+        "24시간 뒤 미션 클리어야. 지인·친구 초대와 동반 초대는 인정되지 않아."
+    ),
     "미클승격": "노미클 기간 일주일 동안 홍보지 2,000개와 총 30,000마디 이상 활동해야 해.",
     "벙": "벙은 미클자만 참여 가능해. 게시판 댓글은 [닉네임 / 날짜 / 건벙 또는 섹벙] 양식이야.",
     "섹벙": "여성은 섹벙 3회째에 검사지 제출이 필수야. 같은 사람과의 섹벙은 횟수에서 차감하지 않아.",
@@ -159,18 +142,24 @@ GLOSSARY = {
 def verify_line_signature(body, signature):
     if not LINE_CHANNEL_SECRET or not signature:
         return False
+
     digest = hmac.new(
         LINE_CHANNEL_SECRET.encode("utf-8"),
         body,
         hashlib.sha256,
     ).digest()
+
     expected = base64.b64encode(digest).decode("utf-8")
     return hmac.compare_digest(expected, signature)
 
 
 def reply_to_line(reply_token, message):
     if not LINE_CHANNEL_ACCESS_TOKEN or not reply_token:
-        logger.error("LINE 토큰 또는 replyToken이 없음")
+        logger.error(
+            "LINE 답장 불가: 토큰 설정 여부=%s, replyToken 존재=%s",
+            bool(LINE_CHANNEL_ACCESS_TOKEN),
+            bool(reply_token),
+        )
         return False
 
     payload = {
@@ -180,6 +169,7 @@ def reply_to_line(reply_token, message):
             "text": str(message)[:MAX_LINE_REPLY_LENGTH],
         }],
     }
+
     headers = {
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
         "Content-Type": "application/json",
@@ -192,121 +182,184 @@ def reply_to_line(reply_token, message):
             json=payload,
             timeout=20,
         )
+
         if not response.ok:
             logger.error(
-                "LINE 답장 실패: %s %s",
+                "LINE 답장 실패: HTTP %s, 응답=%s",
                 response.status_code,
-                response.text[:1000],
+                response.text[:800],
             )
             return False
+
+        logger.info("LINE 답장 전송 성공")
         return True
+
     except requests.RequestException:
-        logger.exception("LINE 답장 중 네트워크 오류")
+        logger.exception("LINE 답장 네트워크 오류")
         return False
 
 
-def get_gemini_models():
+def get_available_gemini_models():
+    """API 키로 실제 사용 가능한 generateContent 모델을 조회한다."""
     if not GEMINI_API_KEY:
-        return False, "GEMINI_API_KEY가 Render 환경변수에 설정되지 않았어."
+        raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았어.")
 
+    response = requests.get(
+        GEMINI_MODELS_URL,
+        headers={"x-goog-api-key": GEMINI_API_KEY},
+        params={"pageSize": 100},
+        timeout=20,
+    )
+
+    if not response.ok:
+        logger.error(
+            "Gemini 모델 목록 조회 실패: HTTP %s, 응답=%s",
+            response.status_code,
+            response.text[:800],
+        )
+        response.raise_for_status()
+
+    models = response.json().get("models", [])
+    available = []
+
+    for item in models:
+        name = item.get("name", "")
+        methods = item.get("supportedGenerationMethods", [])
+
+        if not name.startswith("models/"):
+            continue
+        if "generateContent" not in methods:
+            continue
+
+        model_name = name.removeprefix("models/")
+
+        # 대화용 Gemini 모델만 사용한다.
+        if "gemini" not in model_name.lower():
+            continue
+
+        available.append(model_name)
+
+    # Flash 계열을 먼저 시도하고, 그 외 Gemini 모델을 뒤에서 시도한다.
+    available.sort(
+        key=lambda name: (
+            0 if "flash-lite" in name.lower()
+            else 1 if "flash" in name.lower()
+            else 2,
+            "preview" in name.lower(),
+            name,
+        )
+    )
+
+    if not available:
+        raise RuntimeError(
+            "API에서 generateContent를 지원하는 Gemini 모델을 찾지 못했어."
+        )
+
+    return available
+
+
+def get_gemini_models():
     try:
-        response = requests.get(
-            "https://generativelanguage.googleapis.com/v1beta/models",
-            headers={"x-goog-api-key": GEMINI_API_KEY},
-            params={"pageSize": 100},
-            timeout=20,
+        models = get_available_gemini_models()
+        return True, "사용 가능한 Gemini 모델:\n" + "\n".join(
+            f"• {name}" for name in models[:40]
         )
-        if not response.ok:
-            return False, f"모델 조회 실패: HTTP {response.status_code}"
-
-        models = response.json().get("models", [])
-        usable = [
-            model.get("name", "").replace("models/", "")
-            for model in models
-            if "generateContent" in model.get(
-                "supportedGenerationMethods", []
-            )
-        ]
-        if not usable:
-            return True, "사용 가능한 모델이 조회되지 않았어."
-        return True, "사용 가능한 모델:\n" + "\n".join(
-            f"• {name}" for name in usable[:40]
-        )
-    except (requests.RequestException, ValueError):
+    except Exception:
         logger.exception("Gemini 모델 목록 조회 오류")
-        return False, "모델 목록을 가져오지 못했어. Render 로그를 확인해 줘."
+        return False, (
+            "Gemini 모델 목록을 가져오지 못했어. "
+            "Render 로그에서 오류를 확인해 줘."
+        )
 
 
 def ask_gemini(question):
     if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY 환경변수가 없어.")
         return "Gemini API 키가 설정되지 않았어. 관리자에게 알려 줘."
 
     payload = {
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "contents": [{"role": "user", "parts": [{"text": question}]}],
+        "systemInstruction": {
+            "parts": [{"text": SYSTEM_PROMPT}]
+        },
+        "contents": [{
+            "role": "user",
+            "parts": [{"text": question}],
+        }],
         "generationConfig": {
             "temperature": 0.3,
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
         },
     }
 
+    try:
+        models = get_available_gemini_models()
+    except Exception:
+        logger.exception("사용 가능한 Gemini 모델 조회 실패")
+        return (
+            "Gemini 모델을 확인하지 못했어. 😢\n"
+            "관리자가 Render 로그를 확인해 줘."
+        )
+
     last_error = "알 수 없는 오류"
 
-    for model in GEMINI_MODELS:
-        for attempt in range(MAX_RETRIES_PER_MODEL + 1):
-            try:
-                response = requests.post(
-                    f"{GEMINI_BASE_URL}{model}:generateContent",
-                    headers={
-                        "x-goog-api-key": GEMINI_API_KEY,
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=60,
+    for model in models:
+        url = f"{GEMINI_MODELS_URL}/{model}:generateContent"
+
+        try:
+            response = requests.post(
+                url,
+                headers={
+                    "x-goog-api-key": GEMINI_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=45,
+            )
+
+            if not response.ok:
+                last_error = f"{model}: HTTP {response.status_code}"
+
+                logger.error(
+                    "Gemini 요청 실패: model=%s status=%s body=%s",
+                    model,
+                    response.status_code,
+                    response.text[:800],
                 )
 
-                if not response.ok:
-                    last_error = f"HTTP {response.status_code}"
-                    logger.warning(
-                        "Gemini 오류: model=%s status=%s body=%s",
-                        model, response.status_code, response.text[:800],
-                    )
+                # 모델별 미지원/잘못된 요청은 다음 모델을 시도한다.
+                if response.status_code in (400, 404, 429, 500, 502, 503, 504):
+                    continue
 
-                    if response.status_code in (400, 401, 403):
-                        return (
-                            "AI 설정에 문제가 생겼어. 😢\n"
-                            "관리자가 Gemini API 키와 Render 로그를 확인해 줘."
-                        )
-
-                    if response.status_code in RETRY_STATUS_CODES:
-                        if attempt < MAX_RETRIES_PER_MODEL:
-                            time.sleep(1.5 * (attempt + 1))
-                            continue
+                # 인증 또는 권한 오류는 로그에 남기고 종료한다.
+                if response.status_code in (401, 403):
                     break
 
-                data = response.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    answer = "".join(
-                        part.get("text", "")
-                        for part in parts
-                        if isinstance(part, dict)
-                    ).strip()
-                    if answer:
-                        return answer[:MAX_LINE_REPLY_LENGTH]
+                continue
 
-                last_error = "응답에 텍스트가 없음"
-                logger.warning("Gemini 빈 응답: model=%s", model)
-                break
+            data = response.json()
+            candidates = data.get("candidates", [])
 
-            except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
-                last_error = str(exc)
-                logger.exception("Gemini 요청 처리 오류: %s", model)
-                if attempt < MAX_RETRIES_PER_MODEL:
-                    time.sleep(1.5 * (attempt + 1))
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                answer = "".join(
+                    part.get("text", "")
+                    for part in parts
+                    if isinstance(part, dict)
+                ).strip()
 
-    logger.error("모든 Gemini 모델 실패: %s", last_error)
+                if answer:
+                    logger.info("Gemini 답변 생성 성공: model=%s", model)
+                    return answer[:MAX_LINE_REPLY_LENGTH]
+
+            last_error = f"{model}: 응답에 텍스트가 없음"
+            logger.warning("Gemini 빈 응답: model=%s", model)
+
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            last_error = f"{model}: 요청 또는 응답 처리 오류"
+            logger.exception("Gemini 요청 처리 중 오류: model=%s", model)
+
+    logger.error("모든 Gemini 모델 요청 실패: %s", last_error)
+
     return (
         "지금은 AI 답변을 가져오지 못했어. 😢\n"
         "잠시 후 다시 시도해 줘. 같은 오류가 반복되면 관리자에게 알려 줘."
@@ -317,10 +370,9 @@ def handle_quick_command(question):
     normalized = question.strip()
     lower = normalized.lower()
 
-    if lower in ("도움말", "help", "명령어", "기능"):
+    if lower in ("도움말", "help", "기능"):
         return (
-            "사용 가능한 명령어\n"
-            "• !명령어 — 기존 명령어 목록\n"
+            "사용 가능한 기능\n"
             "• ! 오늘의질문 — 대화 주제 추천\n"
             "• ! 밸런스게임 — 밸런스 질문\n"
             "• ! 순서 이름 이름 — 참여 순서 섞기\n"
@@ -330,7 +382,9 @@ def handle_quick_command(question):
             "그 외 질문은 ! 질문 형식으로 보내 줘."
         )
 
-    if lower in ("오늘의질문", "오늘의 질문", "질문추천", "대화주제", "대화 주제"):
+    if lower in (
+        "오늘의질문", "오늘의 질문", "질문추천", "대화주제", "대화 주제"
+    ):
         return "오늘의 질문 💬\n" + random.choice(TODAY_QUESTIONS)
 
     if lower in ("밸런스게임", "밸런스 게임", "밸런스"):
@@ -339,10 +393,13 @@ def handle_quick_command(question):
     if lower.startswith(("순서", "랜덤순서", "랜덤 순서")):
         parts = normalized.split()
         names = parts[1:]
+
         if len(names) < 2:
             return "이름을 2명 이상 적어 줘.\n예시: ! 순서 치호 멍멍 수박"
+
         if len(names) > 50:
             return "한 번에 섞을 수 있는 이름은 최대 50명이야."
+
         random.shuffle(names)
         return "랜덤 순서 🎲\n" + "\n".join(
             f"{i}. {name}" for i, name in enumerate(names, 1)
@@ -351,30 +408,43 @@ def handle_quick_command(question):
     if lower == "규칙" or lower.startswith(("규칙 ", "규칙검색 ")):
         parts = normalized.split(maxsplit=1)
         topic = parts[1].strip() if len(parts) > 1 else ""
+
         if not topic:
             return "찾을 규칙을 적어 줘.\n예시: ! 규칙 갠라"
+
         for key in sorted(RULES_FAQ, key=len, reverse=True):
             if key.lower() in topic.lower() or topic.lower() in key.lower():
                 return RULES_FAQ[key]
+
         if "검사" in topic or "검사지" in topic:
             return RULES_FAQ["섹벙"]
+
         if "초대" in topic or "여초" in topic or "72시간" in topic:
             return RULES_FAQ["미클"]
+
         if "앨범" in topic or "캡처" in topic:
             return RULES_FAQ["사진"]
+
         return "빠른 검색에서 찾지 못했어. ! 뒤에 질문을 적거나 관리자에게 확인해 줘."
 
     if lower == "용어집" or lower.startswith(("용어집 ", "용어 ")):
         parts = normalized.split(maxsplit=1)
+
         if len(parts) == 1:
             return "주요 용어: " + ", ".join(GLOSSARY.keys()) + "\n예시: ! 용어집 미클"
+
         term = parts[1].strip()
         matches = [
-            (key, value) for key, value in GLOSSARY.items()
+            (key, value)
+            for key, value in GLOSSARY.items()
             if term.lower() in key.lower() or key.lower() in term.lower()
         ]
+
         if matches:
-            return "\n".join(f"{key}: {value}" for key, value in matches[:5])
+            return "\n".join(
+                f"{key}: {value}" for key, value in matches[:5]
+            )
+
         return "그 용어는 용어집에서 찾지 못했어."
 
     return None
@@ -397,9 +467,7 @@ def health():
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    body = request.get_data(as_text=True)
-    print("[DEBUG] LINE callback received")
-    print("[DEBUG] Body:", body[:1000])
+    body = request.get_data()
     signature = request.headers.get("X-Line-Signature", "")
 
     if not verify_line_signature(body, signature):
@@ -412,7 +480,10 @@ def callback():
         logger.exception("LINE 웹훅 JSON 파싱 실패")
         abort(400)
 
-    for event in payload.get("events", []):
+    events = payload.get("events", [])
+    logger.info("LINE 웹훅 수신: events=%s", len(events))
+
+    for event in events:
         try:
             if event.get("type") != "message":
                 continue
@@ -423,98 +494,33 @@ def callback():
 
             text = message.get("text", "").strip()
             reply_token = event.get("replyToken")
-            source = event.get("source", {})
-            user_id = source.get("userId", "")
-            group_id = source.get("groupId", "")
-            source_type = source.get("type", "")
 
-            # 치호의 기존 닉네임 조회 기능 유지
-            user_name = "Unknown"
-            if user_id and LINE_CHANNEL_ACCESS_TOKEN:
-                headers = {
-                    "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
-                }
-                try:
-                    if source_type == "group" and group_id:
-                        profile_url = (
-                            f"https://api.line.me/v2/bot/group/"
-                            f"{group_id}/member/{user_id}"
-                        )
-                    elif source_type == "room":
-                        room_id = source.get("roomId", "")
-                        profile_url = (
-                            f"https://api.line.me/v2/bot/room/"
-                            f"{room_id}/member/{user_id}"
-                        )
-                    else:
-                        profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
-
-                    profile_response = requests.get(
-                        profile_url, headers=headers, timeout=10
-                    )
-                    if profile_response.ok:
-                        user_name = profile_response.json().get(
-                            "displayName", "Unknown"
-                        )
-                except requests.RequestException:
-                    logger.exception("LINE 프로필 조회 실패")
-
-            # 기존 마딧수 기능
-            if user_id:
-                if user_id not in user_scores:
-                    user_scores[user_id] = {"name": user_name, "count": 0}
-                user_scores[user_id]["name"] = user_name
-                user_scores[user_id]["count"] += len(
-                    text.replace(" ", "").replace("\n", "")
-                )
-
-            # 기존 !마딧수 / !마딧수순위
-            if text in ("!마딧수", "!마딧수순위"):
-                if not user_scores:
-                    reply_to_line(reply_token, "📊 집계된 마딧수 데이터가 없습니다.")
-                else:
-                    ranked = sorted(
-                        user_scores.values(),
-                        key=lambda item: item["count"],
-                        reverse=True,
-                    )
-                    result = ["📊 [그룹 마딧수 순위]"]
-                    for i, item in enumerate(ranked, start=1):
-                        result.append(f"{i}. {item['name']} {item['count']:,}")
-                    reply_to_line(reply_token, "\n".join(result))
-                continue
-
-            # 기존 !마딧수리셋
-            if text == "!마딧수리셋":
-                user_scores.clear()
-                reply_to_line(reply_token, "🧹 모든 마딧수 집계가 리셋되었습니다.")
-                continue
-
-            # 기존 고정 명령어 우선 처리
-            if text in COMMANDS:
-                reply_to_line(reply_token, COMMANDS[text])
-                continue
-
-            # AI 모델 목록 명령어
-            if text.lower() == "!aimodels":
-                success, result = get_gemini_models()
-                if not success:
-                    logger.warning("모델 목록 조회 실패: %s", result)
-                reply_to_line(reply_token, result)
-                continue
-
-            # !로 시작하지 않는 일반 대화에는 AI가 답하지 않음
+            # 일반 메시지에는 답하지 않는다.
             if not text.startswith("!"):
                 continue
 
-            # !ai 질문 형식과 ! 질문 형식 모두 지원
+            logger.info(
+                "명령어 수신: prefix=!, chars=%s",
+                len(text),
+            )
+
+            # 모델 목록 명령
+            if text.lower() == "!aimodels":
+                _, result = get_gemini_models()
+                reply_to_line(reply_token, result)
+                continue
+
+            # !ai 질문 및 ! 질문 형식
             if text.startswith("!ai "):
                 question = text[4:].strip()
             else:
                 question = text[1:].strip()
 
             if not question:
-                reply_to_line(reply_token, "질문을 같이 적어 줘!\n예시: ! 안녕")
+                reply_to_line(
+                    reply_token,
+                    "질문을 같이 적어 줘!\n예시: ! 안녕",
+                )
                 continue
 
             quick_answer = handle_quick_command(question)
@@ -525,22 +531,22 @@ def callback():
             if len(question) > MAX_QUESTION_LENGTH:
                 reply_to_line(
                     reply_token,
-                    f"질문이 너무 길어. {MAX_QUESTION_LENGTH}자 이내로 보내 줘."
+                    f"질문이 너무 길어. {MAX_QUESTION_LENGTH}자 이내로 보내 줘.",
                 )
                 continue
 
-            logger.info("AI 질문 수신: chars=%s", len(question))
+            logger.info("AI 질문 처리 시작")
             answer = ask_gemini(question)
             reply_to_line(reply_token, answer)
 
         except Exception:
-            # 한 이벤트에서 오류가 나더라도 서버 전체가 중단되지 않게 처리
             logger.exception("웹훅 이벤트 처리 중 예외 발생")
+
             try:
                 reply_token = event.get("replyToken")
                 reply_to_line(
                     reply_token,
-                    "메시지 처리 중 오류가 발생했어. 잠시 후 다시 시도해 줏."
+                    "메시지 처리 중 오류가 발생했어. 잠시 후 다시 시도해 줘.",
                 )
             except Exception:
                 logger.exception("오류 안내 메시지 전송 실패")
